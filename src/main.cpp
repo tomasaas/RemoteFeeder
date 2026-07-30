@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <Preferences.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -14,12 +13,37 @@
 #error "Copy include/secrets.example.h to include/secrets.h and add your credentials."
 #endif
 
-WiFiClientSecure secureClient;
+class ReliableWiFiClientSecure : public WiFiClientSecure {
+ public:
+  size_t write(uint8_t data) override {
+    return write(&data, 1);
+  }
+
+  size_t write(const uint8_t* buffer, size_t size) override {
+    size_t totalWritten = 0;
+    const uint32_t startedAt = millis();
+
+    while (totalWritten < size && connected()) {
+      const size_t written =
+          WiFiClientSecure::write(buffer + totalWritten, size - totalWritten);
+
+      if (written > 0) {
+        totalWritten += written;
+      } else if (millis() - startedAt >= 15000) {
+        break;
+      } else {
+        delay(1);
+      }
+    }
+
+    return totalWritten;
+  }
+};
+
+ReliableWiFiClientSecure secureClient;
 PubSubClient mqttClient(secureClient);
-Preferences preferences;
 FeederController feeder;
 
-String lastMessageId;
 String activeMessageId;
 String lastResult = "none";
 String mqttClientId;
@@ -30,22 +54,6 @@ bool timeSyncStarted = false;
 
 bool retryDue(uint32_t now, uint32_t scheduledAt) {
   return static_cast<int32_t>(now - scheduledAt) >= 0;
-}
-
-bool validMessageId(const String& messageId) {
-  if (messageId.isEmpty() || messageId.length() > 64) {
-    return false;
-  }
-
-  for (size_t i = 0; i < messageId.length(); ++i) {
-    const char character = messageId[i];
-    if (!isalnum(static_cast<unsigned char>(character)) &&
-        character != '-' && character != '_') {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 void publishStatus(
@@ -62,11 +70,14 @@ void publishStatus(
       payload,
       sizeof(payload),
       "{\"state\":\"%s\",\"result\":\"%s\",\"message_id\":\"%s\","
-      "\"rejected_message_id\":\"%s\",\"uptime_s\":%lu,\"rssi\":%ld}",
+      "\"rejected_message_id\":\"%s\",\"manual\":%s,\"position\":%d,"
+      "\"uptime_s\":%lu,\"rssi\":%ld}",
       state,
       result,
       messageId.c_str(),
       rejectedMessageId.c_str(),
+      feeder.isManual() ? "true" : "false",
+      feeder.manualPosition(),
       millis() / 1000UL,
       static_cast<long>(WiFi.RSSI()));
 
@@ -74,59 +85,121 @@ void publishStatus(
   Serial.printf("Status: %s\n", payload);
 }
 
-void handleFeedCommand(const String& messageId) {
-  if (!validMessageId(messageId)) {
+void handleFeedCommand(const String& payload) {
+  if (payload != "1") {
     publishStatus(
-        feeder.isBusy() ? "feeding" : "ready",
-        "invalid_message_id",
+        feeder.isFeeding() ? "feeding" : "ready",
+        "invalid_feed_value",
         activeMessageId);
     return;
   }
 
-  if (messageId == lastMessageId) {
-    publishStatus(
-        feeder.isBusy() ? "feeding" : "ready",
-        "duplicate",
-        messageId);
+  if (feeder.isManual()) {
+    publishStatus("manual", "manual_mode", activeMessageId, payload);
     return;
   }
 
   if (feeder.isBusy()) {
-    publishStatus("feeding", "busy", activeMessageId, messageId);
+    publishStatus(
+        feeder.isFeeding() ? "feeding" : "returning",
+        "busy",
+        activeMessageId,
+        payload);
     return;
   }
 
-  lastMessageId = messageId;
-  activeMessageId = messageId;
+  activeMessageId = payload;
   lastResult = "in_progress";
-  preferences.putString("last_id", lastMessageId);
-  preferences.putString("last_result", lastResult);
 
   if (!feeder.startFeed()) {
-    activeMessageId = "";
     lastResult = "failed";
-    preferences.putString("last_result", lastResult);
-    publishStatus("error", "servo_attach_failed", lastMessageId);
+    publishStatus("error", "servo_attach_failed", activeMessageId);
+    activeMessageId = "";
     return;
   }
 
   publishStatus("feeding", "accepted", activeMessageId);
 }
 
-void mqttMessageReceived(char* topic, byte* payload, unsigned int length) {
-  if (strcmp(topic, config::MQTT_COMMAND_TOPIC) != 0) {
+void handleManualCommand(const String& payload) {
+  if (payload == "1") {
+    if (feeder.isManual()) {
+      publishStatus("manual", "already_enabled");
+      return;
+    }
+
+    if (feeder.isFeeding()) {
+      lastResult = "manual_override";
+      activeMessageId = "";
+    }
+
+    if (!feeder.enableManual()) {
+      publishStatus("error", "servo_attach_failed");
+      return;
+    }
+
+    publishStatus("manual", "enabled");
     return;
   }
 
-  String messageId;
-  messageId.reserve(length);
-
-  for (unsigned int i = 0; i < length; ++i) {
-    messageId += static_cast<char>(payload[i]);
+  if (payload == "0") {
+    if (feeder.disableManual()) {
+      publishStatus("returning", "manual_disabled");
+    } else {
+      publishStatus(
+          feeder.isFeeding() ? "feeding" : "ready",
+          "already_automatic",
+          feeder.isFeeding() ? activeMessageId : "");
+    }
+    return;
   }
 
-  messageId.trim();
-  handleFeedCommand(messageId);
+  publishStatus(
+      feeder.isManual() ? "manual" : (feeder.isFeeding() ? "feeding" : "ready"),
+      "invalid_manual_value",
+      feeder.isFeeding() ? activeMessageId : "");
+}
+
+void handlePositionCommand(const String& payload) {
+  char* end = nullptr;
+  const long position = strtol(payload.c_str(), &end, 10);
+
+  if (payload.isEmpty() || *end != '\0' || position < -60 || position > 60) {
+    publishStatus(
+        feeder.isManual() ? "manual" : (feeder.isFeeding() ? "feeding" : "ready"),
+        "invalid_position",
+        feeder.isFeeding() ? activeMessageId : "");
+    return;
+  }
+
+  if (!feeder.setManualPosition(static_cast<int8_t>(position))) {
+    publishStatus(
+        feeder.isFeeding() ? "feeding" : "ready",
+        "manual_disabled",
+        feeder.isFeeding() ? activeMessageId : "");
+    return;
+  }
+
+  publishStatus("manual", "position_set");
+}
+
+void mqttMessageReceived(char* topic, byte* payload, unsigned int length) {
+  String message;
+  message.reserve(length);
+
+  for (unsigned int i = 0; i < length; ++i) {
+    message += static_cast<char>(payload[i]);
+  }
+
+  message.trim();
+
+  if (strcmp(topic, config::MQTT_COMMAND_TOPIC) == 0) {
+    handleFeedCommand(message);
+  } else if (strcmp(topic, config::MQTT_MANUAL_TOPIC) == 0) {
+    handleManualCommand(message);
+  } else if (strcmp(topic, config::MQTT_POSITION_TOPIC) == 0) {
+    handlePositionCommand(message);
+  }
 }
 
 void connectWifi(uint32_t now) {
@@ -157,7 +230,7 @@ void connectMqtt(uint32_t now) {
   if (mqttClient.connected() ||
       WiFi.status() != WL_CONNECTED ||
       !clockIsReady() ||
-      feeder.isBusy() ||
+      feeder.isMoving() ||
       !retryDue(now, nextMqttAttempt)) {
     return;
   }
@@ -176,26 +249,36 @@ void connectMqtt(uint32_t now) {
 
   if (!connected) {
     Serial.printf("MQTT connection failed, state=%d\n", mqttClient.state());
+    char tlsError[128] = {};
+    const int tlsErrorCode = secureClient.lastError(tlsError, sizeof(tlsError));
+
+    if (tlsErrorCode < 0) {
+      Serial.printf(
+          "Wi-Fi RSSI=%ld dBm, TLS=%d (%s)\n",
+          static_cast<long>(WiFi.RSSI()),
+          tlsErrorCode,
+          tlsError);
+    } else {
+      Serial.printf(
+          "Wi-Fi RSSI=%ld dBm, TLS connected (socket=%d), MQTT timed out\n",
+          static_cast<long>(WiFi.RSSI()),
+          tlsErrorCode);
+    }
     return;
   }
 
-  mqttClient.subscribe(config::MQTT_COMMAND_TOPIC, 1);
-  publishStatus("ready", lastResult.c_str(), lastMessageId);
+  mqttClient.subscribe(config::MQTT_MANUAL_TOPIC, 1);
+  mqttClient.subscribe(config::MQTT_POSITION_TOPIC, 1);
+  mqttClient.subscribe(config::MQTT_COMMAND_TOPIC, 0);
+  publishStatus(
+      feeder.isManual() ? "manual" : "ready",
+      lastResult.c_str());
   Serial.println("MQTT connected.");
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
-
-  preferences.begin("dog-feeder", false);
-  lastMessageId = preferences.getString("last_id", "");
-  lastResult = preferences.getString("last_result", "none");
-
-  if (lastResult == "in_progress") {
-    lastResult = "interrupted";
-    preferences.putString("last_result", lastResult);
-  }
 
   feeder.begin();
 
@@ -209,13 +292,13 @@ void setup() {
   mqttClientId += String(static_cast<uint32_t>(chipId), HEX);
 
   secureClient.setCACert(config::ROOT_CA);
-  secureClient.setHandshakeTimeout(10);
-  secureClient.setTimeout(3);
+  secureClient.setHandshakeTimeout(20);
+  secureClient.setTimeout(15);
 
   mqttClient.setServer(config::MQTT_HOST, config::MQTT_PORT);
   mqttClient.setCallback(mqttMessageReceived);
   mqttClient.setKeepAlive(30);
-  mqttClient.setSocketTimeout(3);
+  mqttClient.setSocketTimeout(15);
   mqttClient.setBufferSize(512);
 
   connectWifi(millis());
@@ -226,9 +309,12 @@ void loop() {
 
   if (feeder.consumeCompleted()) {
     lastResult = "completed";
-    preferences.putString("last_result", lastResult);
     publishStatus("ready", lastResult.c_str(), activeMessageId);
     activeMessageId = "";
+  }
+
+  if (feeder.consumeManualReturnCompleted()) {
+    publishStatus("ready", "manual_disabled");
   }
 
   const uint32_t now = millis();
