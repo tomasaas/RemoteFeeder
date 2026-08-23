@@ -73,6 +73,9 @@ void setup()
 
     // MQTT library
     mqttClient.setCallback(callback);
+
+    // Timer
+    unsigned long previousMillis = 0;
 }
 
 void loop() 

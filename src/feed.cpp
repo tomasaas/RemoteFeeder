@@ -7,7 +7,7 @@ void feed(Servo& servo) {
     int CCW = 90 + speedAbs; 
     int CW = 90 - speedAbs; 
     int stop = 90;
-    int feedTime = 5000; 
+    int feedTime = 5000;     
 
     servo.write(CCW);
     delay(800);
@@ -18,6 +18,4 @@ void feed(Servo& servo) {
     servo.write(CW);
     delay(800); 
     servo.write(stop);
- 
-    servo.detach();
-}
+ }
