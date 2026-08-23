@@ -56,7 +56,7 @@ void setup()
 
     //Servo library
     Serial.println("Attaching to servo...");
-    myservo.attach(13, 1000, 2000);  // Attach to pin 18, min pulsbredde (1500 senturm vinkel), maks pulsbredde
+    myservo.attach(13, 1000, 2000);  // Attach to pin 13, min pulsbredde (1500 senturm vinkel), maks pulsbredde
     bool attached = myservo.attached();
     attached 
         ? Serial.println("Attached successfully to myservo!") 
@@ -72,11 +72,7 @@ void setup()
     WiFi.mode(WIFI_STA); // vanlig wifi klient, bare for ordens skyld. 
 
     // MQTT library
-    mqttClient.setCallback(callback);
-
-    // Timer
-    unsigned long previousMillis = 0;
-}
+    mqttClient.setCallback(callback);}
 
 void loop() 
 {
@@ -84,9 +80,4 @@ void loop()
         reconnect(); 
     }
     mqttClient.loop();
-
-
-
-    // feed(myservo);
 }
-

@@ -9,13 +9,13 @@ void feed(Servo& servo) {
     int stop = 90;
     int feedTime = 5000;     
 
-    servo.write(CCW);
+    servo.write(CW);
     delay(800);
     servo.write(stop);
 
     delay(feedTime);
     
-    servo.write(CW);
+    servo.write(CCW);
     delay(800); 
     servo.write(stop);
  }
