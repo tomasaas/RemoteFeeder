@@ -70,3 +70,9 @@ Testing/
 
 # PlatformIO
 .pio
+
+# VSCode
+.vscode
+
+# Secrets, i.e. wifi password
+secrets.h

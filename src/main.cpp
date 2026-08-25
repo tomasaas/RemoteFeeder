@@ -3,13 +3,12 @@
 #include <WiFi.h>
 // #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <secrets.h> // wifi login
 
 // Servo library
 Servo myservo;
 
 // WiFi library
-const char* ssid = "Zyxel_8086";
-const char* password = "REMOVED";
 WiFiClient wifiClient; // trenger en wifiklient til mqtt
 
 // MQTT library
@@ -64,12 +63,12 @@ void setup()
 
     // WiFi library
     Serial.println("Connecting to WiFi...");
-    WiFi.begin(ssid, password);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWD);
     while (WiFi.status() != WL_CONNECTED) { 
         delay(500); 
     }
     Serial.println("Wi-Fi connected successfully!");
-    WiFi.mode(WIFI_STA); // vanlig wifi klient, bare for ordens skyld. 
+    WiFi.mode(WIFI_STA); // vanlig wifi klient, trenger sikkert ikke denne linjen. 
 
     // MQTT library
     mqttClient.setCallback(callback);}
