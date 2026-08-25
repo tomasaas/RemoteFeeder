@@ -5,12 +5,13 @@
 #include <PubSubClient.h>
 #include <secrets.h> // wifi login
 
+
+
+
 // Servo library
 Servo myservo;
-
 // WiFi library
 WiFiClient wifiClient; // trenger en wifiklient til mqtt
-
 // MQTT library
 PubSubClient mqttClient(
     "194.164.61.72", 
@@ -38,15 +39,30 @@ void reconnect() {
   }
 }
 
+
+
+
+
+// Init for feed() logic. 
+bool feeding = false; 
+bool feedRequested = false; 
+int feedStep = 0; 
+unsigned long stepStarted = 0; 
+
+
 void callback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
     Serial.print(topic);
     Serial.println("]");
 
     if (strcmp(topic, "remotefeeder/feed") == 0) {
-        feed(myservo);
+        feedRequested = true; 
     }
 }
+
+
+
+
 
 
 void setup() 
@@ -79,4 +95,6 @@ void loop()
         reconnect(); 
     }
     mqttClient.loop();
+
+    feed(myservo, feedRequested, feeding, feedStep, stepStarted); // Non-blocking delay - må kjøres hver loop
 }
